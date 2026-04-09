@@ -41,14 +41,18 @@ StdVector<int> &get_tls_index_offsets() {
 template <typename Type_T>
 void generate_mesh(
 		StdVector<VoxelMesherBlocky::Arrays> &out_arrays_per_material,
-		VoxelMesher::Output::CollisionSurface *collision_surface,
-		const Span<const Type_T> type_buffer,
-		const Vector3i block_size,
-		const BakedLibrary &library,
-		const bool bake_occlusion,
-		const float baked_occlusion_darkness,
-		const TintSampler tint_sampler
-) {
+        VoxelMesher::Output::CollisionSurface *collision_surface,
+        const Span<const Type_T> type_buffer,
+        const Vector3i block_size,
+        const BakedLibrary &library,
+        const bool bake_occlusion,
+        const float baked_occlusion_darkness,
+        const TintSampler tint_sampler,
+        const bool skew_top,
+        const float skew_amount,
+        const int skew_layer_y,
+        const Vector3i origin_in_voxels
+	)  {
 	// TODO Optimization: not sure if this mandates a template function. There is so much more happening in this
 	// function other than reading voxels, although reading is on the hottest path. It needs to be profiled. If
 	// changing makes no difference, we could use a function pointer or switch inside instead to reduce executable size.
@@ -147,6 +151,34 @@ void generate_mesh(
 
 				const BakedModel &voxel = library.models[voxel_id];
 				const BakedModel::Model &model = voxel.model;
+
+				// world Y of this voxel (accounts for padding)
+				const int world_y = origin_in_voxels.y + ((int)y - (int)VoxelMesherBlocky::PADDING);
+				const bool apply_top_skew = skew_top && (world_y == skew_layer_y);
+
+				// horizontal XZ neighbor solidity, only fetched when skewing
+				bool solid_left = false;
+				bool solid_right = false;
+				bool solid_front = false;
+				bool solid_back = false;
+				bool solid_bl = false;
+				bool solid_br = false;
+				bool solid_fl = false;
+				bool solid_fr = false;
+
+				if (apply_top_skew) {
+					auto is_solid = [&](int lut_offset) -> bool {
+						return (uint32_t)type_buffer[(unsigned)(voxel_index + lut_offset)] != AIR_ID;
+					};
+					solid_left = is_solid(side_neighbor_lut[Cube::SIDE_LEFT]);
+					solid_right = is_solid(side_neighbor_lut[Cube::SIDE_RIGHT]);
+					solid_front = is_solid(side_neighbor_lut[Cube::SIDE_FRONT]);
+					solid_back = is_solid(side_neighbor_lut[Cube::SIDE_BACK]);
+					solid_bl = is_solid(edge_neighbor_lut[Cube::EDGE_BACK_LEFT]); 
+					solid_br = is_solid(edge_neighbor_lut[Cube::EDGE_BACK_RIGHT]); 
+					solid_fl = is_solid(edge_neighbor_lut[Cube::EDGE_FRONT_LEFT]);
+					solid_fr = is_solid(edge_neighbor_lut[Cube::EDGE_FRONT_RIGHT]);
+				}
 
 				// Calculate visibility of sides
 				uint32_t visible_sides_mask = 0;
@@ -302,8 +334,37 @@ void generate_mesh(
 							const int append_index = arrays.positions.size();
 							arrays.positions.resize(arrays.positions.size() + vertex_count);
 							Vector3f *w = arrays.positions.data() + append_index;
-							for (unsigned int i = 0; i < vertex_count; ++i) {
-								w[i] = side_positions[i] + pos;
+							
+							if (apply_top_skew) {
+								// Skew top vertices to give the blocks a more natural look
+								const float sa = skew_amount;
+								for (unsigned int i = 0; i < vertex_count; ++i) {
+									const Vector3f &sp = side_positions[i];
+									float dx = 0.f, dz = 0.f;
+
+									if (sp.y > 0.5f) {
+										const float vx = sp.x, vz = sp.z;
+
+										if (vx < 0.5f && vz < 0.5f) {
+											if (!solid_right && !solid_br) dx = +sa;
+											if (!solid_back  && !solid_br) dz = +sa;
+										} else if (vx > 0.5f && vz < 0.5f) {
+											if (!solid_left && !solid_bl) dx = -sa;
+											if (!solid_back && !solid_bl) dz = +sa;
+										} else if (vx < 0.5f && vz > 0.5f) {
+											if (!solid_right && !solid_fr) dx = +sa;
+											if (!solid_front && !solid_fr) dz = -sa;
+										} else if (vx > 0.5f && vz > 0.5f) {
+											if (!solid_left  && !solid_fl) dx = -sa;
+											if (!solid_front && !solid_fl) dz = -sa;
+										}
+									}
+									w[i] = Vector3f(sp.x + dx, sp.y, sp.z + dz) + pos;
+								}
+							} else {
+								for (unsigned int i = 0; i < vertex_count; ++i) {
+									w[i] = side_positions[i] + pos;
+								}
 							}
 						}
 
@@ -392,8 +453,24 @@ void generate_mesh(
 								const unsigned int append_index = dst_positions.size();
 								dst_positions.resize(dst_positions.size() + vertex_count);
 								Vector3f *w = dst_positions.data() + append_index;
-								for (unsigned int i = 0; i < vertex_count; ++i) {
-									w[i] = side_positions[i] + pos;
+								if (apply_top_skew) {
+									const float sa = skew_amount;
+									for (unsigned int i = 0; i < vertex_count; ++i) {
+										const Vector3f &sp = side_positions[i];
+										float dx = 0.f, dz = 0.f;
+										if (sp.y > 0.5f) {
+											const float vx = sp.x, vz = sp.z;
+											if (vx < 0.5f && vz < 0.5f) { if (!solid_right && !solid_br) dx = +sa; if (!solid_back  && !solid_br) dz = +sa; }
+											else if (vx > 0.5f && vz < 0.5f) { if (!solid_left  && !solid_bl) dx = -sa; if (!solid_back  && !solid_bl) dz = +sa; }
+											else if (vx < 0.5f && vz > 0.5f) { if (!solid_right && !solid_fr) dx = +sa; if (!solid_front && !solid_fr) dz = -sa; }
+											else if (vx > 0.5f && vz > 0.5f) { if (!solid_left  && !solid_fl) dx = -sa; if (!solid_front && !solid_fl) dz = -sa; }
+										}
+										w[i] = Vector3f(sp.x + dx, sp.y, sp.z + dz) + pos;
+									}
+								} else {
+									for (unsigned int i = 0; i < vertex_count; ++i) {
+										w[i] = side_positions[i] + pos;
+									}
 								}
 							}
 
@@ -563,6 +640,31 @@ void VoxelMesherBlocky::set_tint_mode(const VoxelMesherBlocky::TintMode new_mode
 	_parameters.tint_mode = new_mode;
 }
 
+void VoxelMesherBlocky::set_skew_top(bool enable) {
+    RWLockWrite wlock(_parameters_lock);
+    _parameters.skew_top = enable;
+}
+bool VoxelMesherBlocky::get_skew_top() const {
+    RWLockRead rlock(_parameters_lock);
+    return _parameters.skew_top;
+}
+void VoxelMesherBlocky::set_skew_amount(float amount) {
+    RWLockWrite wlock(_parameters_lock);
+    _parameters.skew_amount = math::clamp(amount, 0.0f, 0.5f);
+}
+float VoxelMesherBlocky::get_skew_amount() const {
+    RWLockRead rlock(_parameters_lock);
+    return _parameters.skew_amount;
+}
+void VoxelMesherBlocky::set_skew_layer_y(int y) {
+    RWLockWrite wlock(_parameters_lock);
+    _parameters.skew_layer_y = y;
+}
+int VoxelMesherBlocky::get_skew_layer_y() const {
+    RWLockRead rlock(_parameters_lock);
+    return _parameters.skew_layer_y;
+}
+
 void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::Input &input) {
 	const VoxelBuffer::ChannelId channel = VoxelBuffer::CHANNEL_TYPE;
 	Parameters params;
@@ -662,7 +764,11 @@ void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::In
 						library_baked_data,
 						params.bake_occlusion,
 						baked_occlusion_darkness,
-						tint_sampler
+						tint_sampler,
+						params.skew_top,
+						params.skew_amount,
+						params.skew_layer_y,
+						input.origin_in_voxels
 				);
 				if (input.lod_index > 0) {
 					blocky::append_skirts(
@@ -681,7 +787,11 @@ void VoxelMesherBlocky::build(VoxelMesher::Output &output, const VoxelMesher::In
 						library_baked_data,
 						params.bake_occlusion,
 						baked_occlusion_darkness,
-						tint_sampler
+						tint_sampler,
+						params.skew_top,
+						params.skew_amount,
+						params.skew_layer_y,
+						input.origin_in_voxels
 				);
 				if (input.lod_index > 0) {
 					blocky::append_skirts(model_ids, block_size, arrays_per_material, library_baked_data, tint_sampler);
@@ -899,6 +1009,14 @@ void VoxelMesherBlocky::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_tint_mode", "mode"), &VoxelMesherBlocky::set_tint_mode);
 	ClassDB::bind_method(D_METHOD("get_tint_mode"), &VoxelMesherBlocky::get_tint_mode);
 
+	ClassDB::bind_method(D_METHOD("set_skew_top", "enable"), &VoxelMesherBlocky::set_skew_top);
+	ClassDB::bind_method(D_METHOD("get_skew_top"), &VoxelMesherBlocky::get_skew_top);
+	ClassDB::bind_method(D_METHOD("set_skew_amount", "amount"), &VoxelMesherBlocky::set_skew_amount);
+	ClassDB::bind_method(D_METHOD("get_skew_amount"), &VoxelMesherBlocky::get_skew_amount);
+	ClassDB::bind_method(D_METHOD("set_skew_layer_y", "y"), &VoxelMesherBlocky::set_skew_layer_y);
+	ClassDB::bind_method(D_METHOD("get_skew_layer_y"), &VoxelMesherBlocky::get_skew_layer_y);
+
+
 	ADD_PROPERTY(
 			PropertyInfo(
 					Variant::OBJECT,
@@ -925,6 +1043,11 @@ void VoxelMesherBlocky::_bind_methods() {
 			"set_tint_mode",
 			"get_tint_mode"
 	);
+
+	ADD_GROUP("Top Vertex Skew", "skew_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "skew_enabled"), "set_skew_top", "get_skew_top");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "skew_amount", PROPERTY_HINT_RANGE, "0,0.5,0.01"), "set_skew_amount", "get_skew_amount");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "skew_layer_y"), "set_skew_layer_y","get_skew_layer_y");
 
 	ADD_GROUP("Shadow Occluders", "shadow_occluder_");
 

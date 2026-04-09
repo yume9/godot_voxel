@@ -55,6 +55,13 @@ public:
 	TintMode get_tint_mode() const;
 	void set_tint_mode(const TintMode new_mode);
 
+	void set_skew_top(bool enable);
+	bool get_skew_top() const;
+	void set_skew_amount(float amount);
+	float get_skew_amount() const;
+	void set_skew_layer_y(int y);
+	int  get_skew_layer_y() const;
+
 	void build(VoxelMesher::Output &output, const VoxelMesher::Input &input) override;
 
 	// TODO GDX: Resource::duplicate() cannot be overriden (while it can in modules).
@@ -114,6 +121,9 @@ private:
 		uint8_t shadow_occluders_mask = 0;
 		Ref<VoxelBlockyLibraryBase> library;
 		TintMode tint_mode = TINT_NONE;
+		bool skew_top = false;
+		float skew_amount = 0.25;
+		int skew_layer_y = 1;    
 	};
 
 	struct Cache {
